@@ -7,71 +7,10 @@ use crossbeam_channel::{unbounded, Receiver, Select, Sender};
 
 pub type BoxMsgAny = Box<dyn std::any::Any + Send>;
 
-trait Actor: Send + Debug {
+pub trait Actor: Send + Debug {
     fn process_msg_any(&mut self, reply_tx: Option<&Sender<BoxMsgAny>>, msg: BoxMsgAny);
     fn name(&self) -> &str;
     fn done(&self) -> bool;
-}
-
-#[derive(Debug, Clone)]
-pub struct ThingChannel {
-    pub tx: Sender<BoxMsgAny>,
-    pub rx: Receiver<BoxMsgAny>,
-}
-
-impl Default for ThingChannel {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ThingChannel {
-    pub fn new() -> Self {
-        let (tx, rx) = unbounded();
-        Self { tx, rx }
-    }
-}
-
-struct MsgInc;
-
-#[derive(Debug)]
-pub struct Thing {
-    pub name: String,
-    pub channel: ThingChannel,
-    pub counter: i32,
-}
-
-impl Thing {
-    pub fn new(name: &str, channel: ThingChannel) -> Self {
-        Self {
-            name: name.to_string(),
-            channel,
-            counter: 0,
-        }
-    }
-
-    pub fn increment(&mut self) {
-        self.counter += 1;
-        println!("Thing::increment: counter={}", self.counter);
-    }
-}
-
-impl Actor for Thing {
-    fn process_msg_any(&mut self, _reply_tx: Option<&Sender<BoxMsgAny>>, msg: BoxMsgAny) {
-        if msg.downcast_ref::<MsgInc>().is_some() {
-            self.increment()
-        } else {
-            println!("Thing.prossess_msg_any: Uknown msg");
-        }
-    }
-
-    fn name(&self) -> &str {
-        self.name.as_str()
-    }
-
-    fn done(&self) -> bool {
-        false
-    }
 }
 
 #[allow(unused)]
@@ -191,6 +130,25 @@ impl Actor for AeActor {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ActorChannel {
+    pub tx: Sender<BoxMsgAny>,
+    pub rx: Receiver<BoxMsgAny>,
+}
+
+impl Default for ActorChannel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ActorChannel {
+    pub fn new() -> Self {
+        let (tx, rx) = unbounded();
+        Self { tx, rx }
+    }
+}
+
 #[allow(unused)]
 #[derive(Debug)]
 pub struct MsgAeAddActor {
@@ -202,14 +160,14 @@ pub struct MsgAeDone;
 
 #[allow(unused)]
 #[derive(Debug)]
-pub enum ManagedThing {
-    TheThing(Thing),
-    ItsChannel(ThingChannel),
+pub enum ManagedActor {
+    TheActor(Box<dyn Actor>),
+    ItsChannel(ActorChannel),
 }
 
 #[derive(Debug)]
 pub struct Manager {
-    things: Vec<ManagedThing>,
+    actors: Vec<ManagedActor>,
 }
 
 impl Default for Manager {
@@ -220,20 +178,31 @@ impl Default for Manager {
 
 impl Manager {
     pub fn new() -> Manager {
-        Self { things: vec![] }
+        Self { actors: vec![] }
     }
 
-    pub fn add_thing(&mut self, thing: Thing) -> usize {
-        let idx = self.things.len();
-        self.things.push(ManagedThing::TheThing(thing));
+    pub fn add_actor(&mut self, actor: Box<dyn Actor>) -> usize {
+        let idx = self.actors.len();
+        self.actors.push(ManagedActor::TheActor(actor));
         idx
     }
 
     pub fn get_tx_for_thing(&self, handle: usize) -> Option<Sender<BoxMsgAny>> {
-        if let Some(mt) = self.things.get(handle) {
+        if let Some(mt) = self.actors.get(handle) {
             match mt {
-                ManagedThing::TheThing(_) => None,
-                ManagedThing::ItsChannel(t) => Some(t.tx.clone()),
+                ManagedActor::TheActor(_) => None,
+                ManagedActor::ItsChannel(t) => Some(t.tx.clone()),
+            }
+        } else {
+            None
+        }
+    }
+
+    pub fn get_rx_for_thing(&self, handle: usize) -> Option<Receiver<BoxMsgAny>> {
+        if let Some(mt) = self.actors.get(handle) {
+            match mt {
+                ManagedActor::TheActor(_) => None,
+                ManagedActor::ItsChannel(t) => Some(t.rx.clone()),
             }
         } else {
             None
@@ -241,24 +210,24 @@ impl Manager {
     }
 
     // Need to make thread safe
-    pub fn own_thing(&mut self, handle: usize) -> Option<Thing> {
-        if let Some(mt) = self.things.get(handle) {
-            match mt {
-                ManagedThing::TheThing(thing) => {
-                    let tc = thing.channel.clone();
+    pub fn own_actor(&mut self, handle: usize) -> Option<Box<dyn Actor>> {
+        if let Some(ma) = self.actors.get(handle) {
+            match ma {
+                ManagedActor::TheActor(_actor) => {
+                    let tc = ActorChannel::new();
 
                     // Replace the thing with it's channel
-                    let mt =
-                        std::mem::replace(&mut self.things[handle], ManagedThing::ItsChannel(tc));
-                    match mt {
-                        ManagedThing::TheThing(thing) => Some(thing),
+                    let ma =
+                        std::mem::replace(&mut self.actors[handle], ManagedActor::ItsChannel(tc));
+                    match ma {
+                        ManagedActor::TheActor(actor) => Some(actor),
                         // This should/cannot ever happen!!
                         _ => {
                             panic!("Manager::own_thing: swap returned TheThing but this should never happen");
                         }
                     }
                 }
-                ManagedThing::ItsChannel(_) => {
+                ManagedActor::ItsChannel(_) => {
                     // Already owned
                     None
                 }
@@ -273,23 +242,89 @@ impl Manager {
 mod tests {
     use super::*;
 
+    #[derive(Debug)]
+    struct MsgInc;
+
+    #[derive(Debug)]
+    struct MsgGetCounter;
+
+    #[derive(Debug)]
+    struct MsgReplyCounter {
+        counter: i32,
+    }
+
+    #[derive(Debug)]
+    pub struct Thing {
+        pub name: String,
+        pub counter: i32,
+    }
+
+    impl Thing {
+        pub fn new(name: &str) -> Self {
+            Self {
+                name: name.to_string(),
+                counter: 0,
+            }
+        }
+
+        pub fn increment(&mut self) {
+            self.counter += 1;
+            println!("Thing::increment: counter={}", self.counter);
+        }
+    }
+
+    impl Actor for Thing {
+        fn process_msg_any(&mut self, reply_tx: Option<&Sender<BoxMsgAny>>, msg: BoxMsgAny) {
+            if msg.downcast_ref::<MsgInc>().is_some() {
+                self.increment()
+            } else if msg.downcast_ref::<MsgGetCounter>().is_some() {
+                let reply_tx = reply_tx.unwrap();
+                reply_tx
+                    .send(Box::new(MsgReplyCounter {
+                        counter: self.counter,
+                    }))
+                    .unwrap();
+            } else {
+                println!("Thing.prossess_msg_any: Uknown msg");
+            }
+        }
+
+        fn name(&self) -> &str {
+            self.name.as_str()
+        }
+
+        fn done(&self) -> bool {
+            false
+        }
+    }
+
     #[test]
     fn test_non_threaded() {
         println!("\ntest_non_threaded:+");
-        let thing = Thing::new("t1", ThingChannel::new());
+        let thing = Box::new(Thing::new("t1"));
         println!("test_non_threaded: thing1={thing:?}");
         let mut manager = Manager::new();
         println!("test_non_threaded: new manager={manager:?}");
-        let t1_handle = manager.add_thing(thing);
+        let t1_handle = manager.add_actor(thing);
         println!("test_non_threaded: t1_handle={t1_handle} manager={manager:?}");
 
-        let mut t1 = manager.own_thing(t1_handle).unwrap();
+        // Send MsgInc
+        let mut t1 = manager.own_actor(t1_handle).unwrap();
         let t1_tx = manager.get_tx_for_thing(t1_handle).unwrap();
-
         t1_tx.send(Box::new(MsgInc {})).unwrap();
-        let msg = t1.channel.rx.recv().unwrap();
-        t1.process_msg_any(None, msg);
-        println!("test_non_threaded:- t1={t1:?}");
+
+        // Recv MsgInc and process
+        let t1_rx = manager.get_rx_for_thing(t1_handle).unwrap();
+        let msg_any = t1_rx.recv().unwrap();
+        t1.process_msg_any(None, msg_any);
+
+        // Create a second reply channel and process MsgGetCounter and recv MsgReplyCounter
+        let (tx, rx) = unbounded::<BoxMsgAny>();
+        t1.process_msg_any(Some(&tx), Box::new(MsgGetCounter));
+        let msg_any = rx.recv().unwrap();
+        let msg_reply_counter = msg_any.downcast_ref::<MsgReplyCounter>().unwrap();
+        println!("test_non_threaded:- MsgReplyCounter={msg_reply_counter:?}");
+        assert_eq!(msg_reply_counter.counter, 1);
     }
 
     #[test]
@@ -298,7 +333,7 @@ mod tests {
         let (executor1_join_handle, executor1_tx) = ActorsExecutor::start("executor1");
         println!("test_executor: executor1_tx={executor1_tx:?}");
 
-        let thing = Thing::new("t1", ThingChannel::new());
+        let thing = Thing::new("t1");
         println!("test_executor: thing1={thing:?}");
         //let mut manager = Manager::new();
         //println!("main: new manager={manager:?}");
