@@ -1,4 +1,4 @@
-//! Need to add ActorExecutor MsgAddActor -> MsgReplyctor
+//! Need to add ActorExecutor MsgAddActor -> MsgReplyActor
 //! Need to add Manager MsgAddActor -> MsgReplyActor
 //! Need to add Manager MsgGetActor -> MsgReplyActor
 //! 
@@ -21,7 +21,7 @@ pub trait Actor: Send + Debug {
     fn process_msg_any(&mut self, reply_tx: Option<&Sender<BoxMsgAny>>, msg: BoxMsgAny);
     fn name(&self) -> &str;
     fn done(&self) -> bool;
-    fn get_bi_dir_channel_for_actor(&self, handle: usize) -> Option<BiDirLocalChannel> {
+    fn get_bi_dir_channel_for_actor(&self, _handle: usize) -> Option<BiDirLocalChannel> {
         None
     }
 }
@@ -57,8 +57,8 @@ pub struct BiDirLocalChannel {
 //#[allow(unused)]
 #[derive(Debug, Clone)]
 pub struct BiDirLocalChannels {
-    their_channel: BiDirLocalChannel,
-    our_channel: BiDirLocalChannel,
+    pub their_channel: BiDirLocalChannel,
+    pub our_channel: BiDirLocalChannel,
 }
 
 impl BiDirLocalChannels {
@@ -224,7 +224,7 @@ impl Actor for AeActor {
             let msg = Box::new(MsgReplyTheirBiDirChannel {
                 bi_dir_channel: Box::new(bdc),
             });
-            reply_tx.unwrap().send(msg);
+            reply_tx.unwrap().send(msg).unwrap();
         } else {
             println!("{}.prossess_msg_any: Uknown msg", self.name());
         }
@@ -239,16 +239,19 @@ impl Actor for AeActor {
     }
 }
 
+#[allow(unused)]
 #[derive(Debug)]
 pub struct MsgAeAddActor {
     actor: Box<dyn Actor>,
 }
 
+#[allow(unused)]
 #[derive(Debug)]
 pub struct MsgGetTheirBiDirChannel {
     handle: usize,
 }
 
+#[allow(unused)]
 #[derive(Debug)]
 pub struct MsgReplyTheirBiDirChannel {
     bi_dir_channel: Box<BiDirLocalChannel>,
@@ -305,28 +308,28 @@ impl Manager {
         if let Some(ma) = self.actors.get(handle) {
             match ma {
                 ManagedActor::TheActor(_actor) => {
-                    //let tc = ActorBiDirChannel::new();
+                    let bdlcs = BiDirLocalChannels::new();
 
                     // Replace the thing with it's channel
                     let ma = std::mem::replace(
                         &mut self.actors[handle],
-                        ManagedActor::TheBiDirChannel(bdlc),
+                        ManagedActor::TheBiDirChannel(Box::new(bdlcs.their_channel)),
                     );
-                    match ma {
+                    return match ma {
                         ManagedActor::TheActor(actor) => Some(actor),
                         // This should/cannot ever happen!!
                         _ => {
                             panic!("Manager::own_thing: swap returned TheThing but this should never happen");
                         }
-                    }
+                    };
                 }
-                ManagedActor::OurChannel(_) => {
+                ManagedActor::TheBiDirChannel(_) => {
                     // Already owned
-                    None
+                    return None;
                 }
             }
         } else {
-            None
+            return None;
         }
     }
 }
