@@ -117,6 +117,7 @@ impl ActorBiDirChannel for BiDirLocalChannel {
 struct ActorsExecutor {
     pub name: String,
     pub actor_vec: Vec<Box<dyn Actor>>,
+    //pub actor_vec: Vec<MsgReqAeAddActor>,
     pub bi_dir_channels_vec: Vec<Box<BiDirLocalChannels>>,
     done: bool,
 }
@@ -169,9 +170,10 @@ impl ActorsExecutor {
                                 bdlc: Box::new(x.their_channel),
                             });
                             let idx = ae.actor_vec.len();
-                            let a = msg.actor;
-                            //ae.actor_vec.push(msg.actor);
-                            //ae.bi_dir_channels_vec.insert(idx, x.clone());
+                            //let a = msg.actor; // Cannot Copy
+                            //ae.bi_dir_channels_vec.insert(idx, msg.actor); // I cannot push the actor so I can use it later?
+                            let a = &msg.actor;
+                            println!("{}.prossess_msg_any: proves actor arrives working, can call msg.actor.done()={}", ae.name(), a.done());
                         } else if let Some(msg) = msg_any.downcast_ref::<MsgAeDone>() {
                             println!("{}.prossess_msg_any: msg={msg:?}", ae.name());
                             ae.done = true;
