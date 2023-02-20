@@ -17,7 +17,7 @@ use crossbeam_channel::{unbounded, Receiver, Select, Sender};
 
 pub type BoxMsgAny = Box<dyn std::any::Any + Send>;
 
-pub trait Actor: Send + Debug {
+pub trait Actor: Send + Debug + Sync {
     fn process_msg_any(&mut self, reply_tx: Option<&Sender<BoxMsgAny>>, msg: BoxMsgAny);
     fn name(&self) -> &str;
     fn done(&self) -> bool;
@@ -162,8 +162,16 @@ impl ActorsExecutor {
                         ae.done = true;
                     }) {
                         // This is a message for this ActorExecutor!!!
-                        if let Some(msg) = msg_any.downcast_ref::<MsgAeAddActor>() {
+                        if let Some(msg) = msg_any.downcast_ref::<MsgReqAeAddActor>() {
                             println!("{}.prossess_msg_any: msg={msg:?}", ae.name());
+                            let x = BiDirLocalChannels::new();
+                            let msg_rsp = Box::new(MsgRspAeAddActor {
+                                bdlc: Box::new(x.their_channel),
+                            });
+                            let idx = ae.actor_vec.len();
+                            let a = msg.actor;
+                            //ae.actor_vec.push(msg.actor);
+                            //ae.bi_dir_channels_vec.insert(idx, x.clone());
                         } else if let Some(msg) = msg_any.downcast_ref::<MsgAeDone>() {
                             println!("{}.prossess_msg_any: msg={msg:?}", ae.name());
                             ae.done = true;
@@ -214,9 +222,17 @@ impl ActorsExecutor {
 
 #[allow(unused)]
 #[derive(Debug)]
-pub struct MsgAeAddActor {
+pub struct MsgReqAeAddActor {
     actor: Box<dyn Actor>,
+    rsp_tx: Sender<BoxMsgAny>,
 }
+
+#[allow(unused)]
+#[derive(Debug)]
+pub struct MsgRspAeAddActor {
+    bdlc: Box<BiDirLocalChannel>,
+}
+
 
 #[allow(unused)]
 #[derive(Debug)]
@@ -319,6 +335,13 @@ impl Actor for ConnMgr {
     }
 }
 
+#[inline(never)]
+pub fn get_bdlc_from_msg_rsp_ae_add_actor(rx: &Receiver<BoxMsgAny>) -> Box<BiDirLocalChannel> {
+    let rsp_msg = rx.recv().unwrap();
+    let msg = rsp_msg.downcast_ref::<MsgRspAeAddActor>().unwrap();
+    msg.bdlc.clone()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,10 +350,10 @@ mod tests {
     struct MsgInc;
 
     #[derive(Debug)]
-    struct MsgGetCounter;
+    struct MsgReqCounter;
 
     #[derive(Debug)]
-    struct MsgReplyCounter {
+    struct MsgRspCounter {
         #[allow(unused)]
         counter: i32,
     }
@@ -359,10 +382,10 @@ mod tests {
         fn process_msg_any(&mut self, reply_tx: Option<&Sender<BoxMsgAny>>, msg: BoxMsgAny) {
             if msg.downcast_ref::<MsgInc>().is_some() {
                 self.increment()
-            } else if msg.downcast_ref::<MsgGetCounter>().is_some() {
+            } else if msg.downcast_ref::<MsgReqCounter>().is_some() {
                 let reply_tx = reply_tx.unwrap();
                 reply_tx
-                    .send(Box::new(MsgReplyCounter {
+                    .send(Box::new(MsgRspCounter {
                         counter: self.counter,
                     }))
                     .unwrap();
@@ -383,6 +406,7 @@ mod tests {
     #[test]
     fn test_conn_mgr() {
         println!("\ntest_conn_mgr:+");
+        let (tx, rx) = unbounded();
 
         // Start an ActorsExecutor
         let (executor1_join_handle, executor1_tx) = ActorsExecutor::start("executor1");
@@ -393,15 +417,18 @@ mod tests {
         println!("test_conn_mgr: thing1={thing:?}");
 
         // Add Thing to the executor
-        let msg = Box::new(MsgAeAddActor {
+        let msg = Box::new(MsgReqAeAddActor {
             actor: Box::new(thing),
+            rsp_tx: tx,
         });
         executor1_tx.send(msg).unwrap();
+        let thing_bdlc = get_bdlc_from_msg_rsp_ae_add_actor(&rx);
 
-        ////t1_tx.send(Box::new(MsgInc{})).unwrap();
-        ////let msg = t1.channel.rx.recv().unwrap();
-        ////t1.process_msg_any(None, msg);
-        ////println!("test_conn_mgr: t1={t1:?}");
+        thing_bdlc.send(Box::new(MsgInc{})).unwrap();
+        thing_bdlc.send(Box::new(MsgReqCounter{})).unwrap();
+        let msg_any = thing_bdlc.recv().unwrap();
+        let msg = msg_any.downcast_ref::<MsgRspCounter>().unwrap();
+        println!("test_conn_mgr: msg={msg:?}");
 
         let msg = Box::new(MsgAeDone);
         executor1_tx.send(msg).unwrap();
@@ -456,7 +483,7 @@ mod tests {
 //        //let mut t1 = manager.own_thing(t1_handle).unwrap();
 //        //let t1_tx = manager.get_tx_for_thing(t1_handle).unwrap();
 //
-//        let msg = Box::new(MsgAeAddActor {
+//        let msg = Box::new(MsgReqAeAddActor {
 //            actor: Box::new(thing),
 //        });
 //        executor1_tx.send(msg).unwrap();
