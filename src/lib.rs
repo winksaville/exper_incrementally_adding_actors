@@ -1,16 +1,17 @@
 //! Need to add ActorExecutor MsgAddActor -> MsgReplyActor
 //! Need to add Manager MsgAddActor -> MsgReplyActor
 //! Need to add Manager MsgGetActor -> MsgReplyActor
-//! 
+//!
 //! Need messages:
 //!   MsgAddActor { actor_id: ActorInstanceId, their_channel: BiDirLocalChannel }
 //!   MsgGetActor { actor_ActorInscneId }
 //!   MsgReplyActor { actor_id: ActorInstanceId, their_channel: BiDirLocalChannel }
-//! 
-//! 
+//!
+//!
 use std::{
+    collections::HashMap,
     fmt::Debug,
-    thread::{self, JoinHandle}, collections::HashMap,
+    thread::{self, JoinHandle},
 };
 
 use crossbeam_channel::{unbounded, Receiver, Select, Sender};
@@ -28,7 +29,11 @@ pub trait Actor: Send + Debug + Sync {
 
 pub trait ActorBiDirChannel: Send + Debug {
     fn clone_tx(&self) -> Sender<BoxMsgAny> {
-        panic!("ActorBiDirChannel `fn send_self` not implemented");
+        panic!("ActorBiDirChannel `fn clone_tx` not implemented");
+    }
+
+    fn clone_rx(&self) -> Receiver<BoxMsgAny> {
+        panic!("ActorBiDirChannel `fn clone_rx` not implemented");
     }
 
     fn send_self(&self, _msg: BoxMsgAny) -> Result<(), Box<dyn std::error::Error>> {
@@ -89,8 +94,8 @@ impl ActorBiDirChannel for BiDirLocalChannel {
         self.tx.clone()
     }
 
-    fn get_recv(&self) -> &Receiver<BoxMsgAny> {
-        &self.rx
+    fn clone_rx(&self) -> Receiver<BoxMsgAny> {
+        self.rx.clone()
     }
 
     fn send_self(&self, msg: BoxMsgAny) -> Result<(), Box<dyn std::error::Error>> {
@@ -110,6 +115,10 @@ impl ActorBiDirChannel for BiDirLocalChannel {
             .recv()
             .map_err(|err| format!("Error recv: {err}").into())
     }
+
+    fn get_recv(&self) -> &Receiver<BoxMsgAny> {
+        &self.rx
+    }
 }
 
 #[allow(unused)]
@@ -117,7 +126,6 @@ impl ActorBiDirChannel for BiDirLocalChannel {
 struct ActorsExecutor {
     pub name: String,
     pub actor_vec: Vec<Box<dyn Actor>>,
-    //pub actor_vec: Vec<MsgReqAeAddActor>,
     pub bi_dir_channels_vec: Vec<Box<BiDirLocalChannels>>,
     done: bool,
 }
@@ -130,19 +138,20 @@ impl ActorsExecutor {
         let ae_actor_bi_dir_channels = BiDirLocalChannels::new();
         let their_bi_dir_channel = Box::new(ae_actor_bi_dir_channels.their_channel.clone());
 
-        let mut ae = Box::new(Self {
-        //let mut ae = Self {
-            name: name.to_string(),
-            actor_vec: Vec::new(),
-            bi_dir_channels_vec: Vec::new(),
-            done: false,
-        });
+        // Convert name to string so it can be moved into the thread
+        let name = name.to_string();
 
         let join_handle = thread::spawn(move || {
+            let mut ae = Self {
+                name: name.to_string(),
+                actor_vec: Vec::new(),
+                bi_dir_channels_vec: Vec::new(),
+                done: false,
+            };
             println!("AE:{}:+", ae.name);
 
             let mut selector = Select::new();
-            let oper_idx = selector.recv(&ae_actor_bi_dir_channels.our_channel.get_recv());
+            let oper_idx = selector.recv(ae_actor_bi_dir_channels.our_channel.get_recv());
             assert_eq!(oper_idx, 0);
 
             while !ae.done {
@@ -153,31 +162,53 @@ impl ActorsExecutor {
                 if oper_idx == 0 {
                     // This messageis for the AE itself
                     let rx = ae_actor_bi_dir_channels.our_channel.get_recv();
+
+                    // error[E0502]: cannot borrow `ae` as mutable because it is also borrowed as immutable
                     if let Ok(msg_any) = oper.recv(rx).map_err(|why| {
-                        // TODO: What to do on errors in general
-                        // Error on our selves, we'll be done
-                        println!(
-                            "AE:{}: error on recv: {why} `done = true`",
-                            ae.name(),
-                        );
+
+                        // TODO: Error on our selves make done, is there anything else we need to do?
+                        println!("AE:{}: error on recv: {why} `done = true`", ae.name());
                         ae.done = true;
                     }) {
                         // This is a message for this ActorExecutor!!!
-                        if let Some(msg) = msg_any.downcast_ref::<MsgReqAeAddActor>() {
+                        if msg_any.downcast_ref::<MsgReqAeAddActor>().is_some() {
+                            // It is a MsgReqAeAddActor, now downcast to concrete message so we can push it to actor_vec
+                            let msg = msg_any.downcast::<MsgReqAeAddActor>().unwrap();
                             println!("{}.prossess_msg_any: msg={msg:?}", ae.name());
-                            let x = BiDirLocalChannels::new();
-                            let msg_rsp = Box::new(MsgRspAeAddActor {
-                                bdlc: Box::new(x.their_channel),
-                            });
-                            let idx = ae.actor_vec.len();
-                            //let a = msg.actor; // Cannot Copy
-                            //ae.bi_dir_channels_vec.insert(idx, msg.actor); // I cannot push the actor so I can use it later?
-                            let a = &msg.actor;
-                            println!("{}.prossess_msg_any: proves actor arrives working, can call msg.actor.done()={}", ae.name(), a.done());
+                            let actor_idx = ae.actor_vec.len();
+                            ae.actor_vec.push(msg.actor);
+
+                            // Create the bdlcs and add to bi_dir_channels_vec
+                            let bdlcs = BiDirLocalChannels::new();
+
+                            let x = ae.bi_dir_channels_vec.len();
+                            assert!(x == actor_idx);
+
+                            // error[E0502]: cannot borrow `ae.bi_dir_channels_vec` as mutable because it is also borrowed as immutable
+                            ae.bi_dir_channels_vec.push(bdlcs);
+
+                            let x = ae.bi_dir_channels_vec.get(actor_idx).unwrap();
+
+                            // This is the key to making ActorExecutor work, we need to add a
+                            // new receiver for this Actor, but this causes two compile
+                            // error[E0502]'s above, i.e. immutable and mutable borrows :(
+                            //selector.recv(x.our_channel.get_recv());
+
+                            // Send the response message and sending their_channel
+                            msg.rsp_tx.send(Box::new(MsgRspAeAddActor {
+                                bdlc: Box::new(x.their_channel.clone()),
+                            }));
+
+                            println!(
+                                "{}.prossess_msg_any: added new receiver for {}",
+                                ae.name(),
+                                ae.actor_vec[actor_idx].name()
+                            );
                         } else if let Some(msg) = msg_any.downcast_ref::<MsgAeDone>() {
                             println!("{}.prossess_msg_any: msg={msg:?}", ae.name());
                             ae.done = true;
-                        } else if let Some(msg) = msg_any.downcast_ref::<MsgGetTheirBiDirChannel>() {
+                        } else if let Some(msg) = msg_any.downcast_ref::<MsgGetTheirBiDirChannel>()
+                        {
                             println!("{}.prossess_msg_any: msg={msg:?}", ae.name());
                             if let Some(bdc) = ae.bi_dir_channels_vec.get(msg.handle) {
                                 let their_channel = bdc.their_channel.clone();
@@ -188,7 +219,11 @@ impl ActorsExecutor {
                                 ae.bi_dir_channels_vec[0].our_channel.tx.send(msg).unwrap();
                             } else {
                                 // TODO: Add Status field in MsgReplyTheirBiDirChannel
-                                println!("{}.prossess_msg_any: MsgGetTheirBiDirChannel bad handle={}", ae.name(), msg.handle);
+                                println!(
+                                    "{}.prossess_msg_any: MsgGetTheirBiDirChannel bad handle={}",
+                                    ae.name(),
+                                    msg.handle
+                                );
                             }
                         } else {
                             println!("{}.prossess_msg_any: Uknown msg", ae.name());
@@ -199,11 +234,16 @@ impl ActorsExecutor {
                     let actor = &mut ae.actor_vec[oper_idx - 1];
                     let rx = ae.bi_dir_channels_vec[oper_idx - 1].our_channel.get_recv();
                     if let Ok(msg_any) = oper.recv(rx).map_err(|why| {
+                        // TODO: What should we do here?
                         panic!("AE:{}: {} error on recv: {why}", ae.name, actor.name())
                     }) {
                         actor.process_msg_any(None, msg_any);
                         if actor.done() {
-                            panic!("AE:{}: {} reported done, what to do?", ae.name, actor.name());
+                            panic!(
+                                "AE:{}: {} reported done, what to do?",
+                                ae.name,
+                                actor.name()
+                            );
                         }
                     }
                 }
@@ -235,7 +275,6 @@ pub struct MsgRspAeAddActor {
     bdlc: Box<BiDirLocalChannel>,
 }
 
-
 #[allow(unused)]
 #[derive(Debug)]
 pub struct MsgGetTheirBiDirChannel {
@@ -250,7 +289,6 @@ pub struct MsgReplyTheirBiDirChannel {
 
 #[derive(Debug)]
 pub struct MsgAeDone;
-
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct InstanceId(usize);
@@ -287,7 +325,9 @@ impl Default for ConnMgr {
 
 impl ConnMgr {
     pub fn new() -> ConnMgr {
-        Self { actors: HashMap::new() }
+        Self {
+            actors: HashMap::new(),
+        }
     }
 
     pub fn add_actor(&mut self, instance_id: InstanceId, bdlc: Box<BiDirLocalChannel>) -> usize {
@@ -301,11 +341,7 @@ impl ConnMgr {
         &self,
         instance_id: InstanceId,
     ) -> Option<Box<BiDirLocalChannel>> {
-        if let Some(bdlc) = self.actors.get(&instance_id) {
-            Some(bdlc.clone())
-        } else {
-            None
-        }
+        self.actors.get(&instance_id).cloned()
     }
 }
 
@@ -317,11 +353,14 @@ impl Actor for ConnMgr {
         } else if let Some(msg) = msg_any.downcast_ref::<MsgCmReqBdlc>() {
             if let Some(tx) = rsp_tx {
                 println!("{}.prossess_msg_any: msg={msg:?}", self.name());
-                let bdlc =  self.get_actor_bi_dir_channel(msg.instance_id.clone());
+                let bdlc = self.get_actor_bi_dir_channel(msg.instance_id.clone());
                 let msg = Box::new(MsgCmRspBdlc { bdlc });
                 tx.send(msg).unwrap();
             } else {
-                println!("{}.prossess_msg_any: No rsp_tx for MsgCmReqBdlc", self.name());
+                println!(
+                    "{}.prossess_msg_any: No rsp_tx for MsgCmReqBdlc",
+                    self.name()
+                );
             }
         } else {
             println!("{}.prossess_msg_any: Uknown msg", self.name());
@@ -338,9 +377,16 @@ impl Actor for ConnMgr {
 }
 
 #[inline(never)]
-pub fn get_bdlc_from_msg_rsp_ae_add_actor(rx: &Receiver<BoxMsgAny>) -> Box<BiDirLocalChannel> {
-    let rsp_msg = rx.recv().unwrap();
-    let msg = rsp_msg.downcast_ref::<MsgRspAeAddActor>().unwrap();
+pub fn recv_bdlc(rx: &Receiver<BoxMsgAny>) -> Box<BiDirLocalChannel> {
+    println!("recv_bdlc:+");
+    let msg_any = rx.recv().unwrap();
+
+    println!("recv_bdlc: msg_any={msg_any:?}");
+    let msg = msg_any.downcast_ref::<MsgRspAeAddActor>().unwrap();
+
+    println!("recv_bdlc: msg={msg:?}");
+
+    println!("recv_bdlc:-");
     msg.bdlc.clone()
 }
 
@@ -424,13 +470,23 @@ mod tests {
             rsp_tx: tx,
         });
         executor1_tx.send(msg).unwrap();
-        let thing_bdlc = get_bdlc_from_msg_rsp_ae_add_actor(&rx);
+        let thing_bdlc = recv_bdlc(&rx);
+        println!("test_conn_mgr: thing_bdlc={thing_bdlc:?}");
 
-        thing_bdlc.send(Box::new(MsgInc{})).unwrap();
-        thing_bdlc.send(Box::new(MsgReqCounter{})).unwrap();
+        println!("test_conn_mgr: send MsgInc");
+        thing_bdlc.send(Box::new(MsgInc)).unwrap();
+        println!("test_conn_mgr: sent MsgInc");
+
+        println!("test_conn_mgr: send MsgReqCounter");
+        thing_bdlc.send(Box::new(MsgReqCounter)).unwrap();
+        println!("test_conn_mgr: sent MsgReqCounter");
+
+        println!("test_conn_mgr: recv msg_any of MsgRspCounter");
         let msg_any = thing_bdlc.recv().unwrap();
+        println!("test_conn_mgr: recvd {msg_any:?} of MsgRspCounter");
+
         let msg = msg_any.downcast_ref::<MsgRspCounter>().unwrap();
-        println!("test_conn_mgr: msg={msg:?}");
+        println!("test_conn_mgr: msg_any.downcast_ref to {msg:?}");
 
         let msg = Box::new(MsgAeDone);
         executor1_tx.send(msg).unwrap();
@@ -440,65 +496,65 @@ mod tests {
         println!("test_conn_mgr:-");
     }
 
-//    #[test]
-//    fn test_non_threaded() {
-//        println!("\ntest_non_threaded:+");
-//        let thing = Box::new(Thing::new("t1"));
-//        println!("test_non_threaded: thing1={thing:?}");
-//        let mut manager = Manager::new();
-//        println!("test_non_threaded: new manager={manager:?}");
-//        let t1_handle = manager.add_actor(thing);
-//        println!("test_non_threaded: t1_handle={t1_handle} manager={manager:?}");
-//
-//        // Send MsgInc
-//        let mut t1 = manager.own_actor(t1_handle).unwrap();
-//        let t1_tx = manager.get_tx_for_thing(t1_handle).unwrap();
-//        t1_tx.send(Box::new(MsgInc {})).unwrap();
-//
-//        // Recv MsgInc and process
-//        let t1_rx = manager.get_rx_for_thing(t1_handle).unwrap();
-//        let msg_any = t1_rx.recv().unwrap();
-//        t1.process_msg_any(None, msg_any);
-//
-//        // Create a second reply channel and process MsgGetCounter and recv MsgReplyCounter
-//        let (tx, rx) = unbounded::<BoxMsgAny>();
-//        t1.process_msg_any(Some(&tx), Box::new(MsgGetCounter));
-//        let msg_any = rx.recv().unwrap();
-//        let msg_reply_counter = msg_any.downcast_ref::<MsgReplyCounter>().unwrap();
-//        println!("test_non_threaded:- MsgReplyCounter={msg_reply_counter:?}");
-//        assert_eq!(msg_reply_counter.counter, 1);
-//    }
-//
-//    #[test]
-//    fn test_executor() {
-//        println!("\ntest_executor:+");
-//        let (executor1_join_handle, executor1_tx) = ActorsExecutor::start("executor1");
-//        println!("test_executor: executor1_tx={executor1_tx:?}");
-//
-//        let thing = Thing::new("t1");
-//        println!("test_executor: thing1={thing:?}");
-//        //let mut manager = Manager::new();
-//        //println!("main: new manager={manager:?}");
-//        //let t1_handle = manager.add_thing(thing);
-//        //println!("main: t1_handle={t1_handle} manager={manager:?}");
-//
-//        //let mut t1 = manager.own_thing(t1_handle).unwrap();
-//        //let t1_tx = manager.get_tx_for_thing(t1_handle).unwrap();
-//
-//        let msg = Box::new(MsgReqAeAddActor {
-//            actor: Box::new(thing),
-//        });
-//        executor1_tx.send(msg).unwrap();
-//
-//        let msg = Box::new(MsgAeDone);
-//        executor1_tx.send(msg).unwrap();
-//
-//        executor1_join_handle.join().unwrap();
-//
-//        //t1_tx.send(Box::new(MsgInc{})).unwrap();
-//        //let msg = t1.channel.rx.recv().unwrap();
-//        //t1.process_msg_any(None, msg);
-//        //println!("main: t1={t1:?}");
-//        println!("test_executor:-");
-//    }
+    //    #[test]
+    //    fn test_non_threaded() {
+    //        println!("\ntest_non_threaded:+");
+    //        let thing = Box::new(Thing::new("t1"));
+    //        println!("test_non_threaded: thing1={thing:?}");
+    //        let mut manager = Manager::new();
+    //        println!("test_non_threaded: new manager={manager:?}");
+    //        let t1_handle = manager.add_actor(thing);
+    //        println!("test_non_threaded: t1_handle={t1_handle} manager={manager:?}");
+    //
+    //        // Send MsgInc
+    //        let mut t1 = manager.own_actor(t1_handle).unwrap();
+    //        let t1_tx = manager.get_tx_for_thing(t1_handle).unwrap();
+    //        t1_tx.send(Box::new(MsgInc {})).unwrap();
+    //
+    //        // Recv MsgInc and process
+    //        let t1_rx = manager.get_rx_for_thing(t1_handle).unwrap();
+    //        let msg_any = t1_rx.recv().unwrap();
+    //        t1.process_msg_any(None, msg_any);
+    //
+    //        // Create a second reply channel and process MsgGetCounter and recv MsgReplyCounter
+    //        let (tx, rx) = unbounded::<BoxMsgAny>();
+    //        t1.process_msg_any(Some(&tx), Box::new(MsgGetCounter));
+    //        let msg_any = rx.recv().unwrap();
+    //        let msg_reply_counter = msg_any.downcast_ref::<MsgReplyCounter>().unwrap();
+    //        println!("test_non_threaded:- MsgReplyCounter={msg_reply_counter:?}");
+    //        assert_eq!(msg_reply_counter.counter, 1);
+    //    }
+    //
+    //    #[test]
+    //    fn test_executor() {
+    //        println!("\ntest_executor:+");
+    //        let (executor1_join_handle, executor1_tx) = ActorsExecutor::start("executor1");
+    //        println!("test_executor: executor1_tx={executor1_tx:?}");
+    //
+    //        let thing = Thing::new("t1");
+    //        println!("test_executor: thing1={thing:?}");
+    //        //let mut manager = Manager::new();
+    //        //println!("main: new manager={manager:?}");
+    //        //let t1_handle = manager.add_thing(thing);
+    //        //println!("main: t1_handle={t1_handle} manager={manager:?}");
+    //
+    //        //let mut t1 = manager.own_thing(t1_handle).unwrap();
+    //        //let t1_tx = manager.get_tx_for_thing(t1_handle).unwrap();
+    //
+    //        let msg = Box::new(MsgReqAeAddActor {
+    //            actor: Box::new(thing),
+    //        });
+    //        executor1_tx.send(msg).unwrap();
+    //
+    //        let msg = Box::new(MsgAeDone);
+    //        executor1_tx.send(msg).unwrap();
+    //
+    //        executor1_join_handle.join().unwrap();
+    //
+    //        //t1_tx.send(Box::new(MsgInc{})).unwrap();
+    //        //let msg = t1.channel.rx.recv().unwrap();
+    //        //t1.process_msg_any(None, msg);
+    //        //println!("main: t1={t1:?}");
+    //        println!("test_executor:-");
+    //    }
 }
