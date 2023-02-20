@@ -10,7 +10,7 @@
 //! 
 use std::{
     fmt::Debug,
-    thread::{self, JoinHandle},
+    thread::{self, JoinHandle}, collections::HashMap,
 };
 
 use crossbeam_channel::{unbounded, Receiver, Select, Sender};
@@ -118,6 +118,7 @@ struct ActorsExecutor {
     pub name: String,
     pub actor_vec: Vec<Box<dyn Actor>>,
     pub bi_dir_channels_vec: Vec<Box<BiDirLocalChannels>>,
+    done: bool,
 }
 
 #[allow(unused)]
@@ -129,63 +130,73 @@ impl ActorsExecutor {
         let their_bi_dir_channel = Box::new(ae_actor_bi_dir_channels.their_channel.clone());
 
         let mut ae = Box::new(Self {
+        //let mut ae = Self {
             name: name.to_string(),
             actor_vec: Vec::new(),
             bi_dir_channels_vec: Vec::new(),
+            done: false,
         });
 
         let join_handle = thread::spawn(move || {
             println!("AE:{}:+", ae.name);
 
-            // The 0th selector will always be the AeActor
-            let ae_actor = Box::new(AeActor::new());
-            ae.actor_vec.push(ae_actor);
-            ae.bi_dir_channels_vec.push(ae_actor_bi_dir_channels);
             let mut selector = Select::new();
-            let oper_idx = selector.recv(&ae.bi_dir_channels_vec[0].our_channel.get_recv());
-            assert_eq!(oper_idx, ae.actor_vec.len() - 1);
+            let oper_idx = selector.recv(&ae_actor_bi_dir_channels.our_channel.get_recv());
+            assert_eq!(oper_idx, 0);
 
-            let mut done = false;
-            while !done {
+            while !ae.done {
                 println!("AE:{}: TOL", ae.name);
                 let oper = selector.select();
                 let oper_idx = oper.index();
-                let actor = &mut ae.actor_vec[oper_idx];
-                let rx = &ae.bi_dir_channels_vec[oper_idx].our_channel.get_recv();
-                if let Ok(msg) = oper.recv(rx).map_err(|why| {
-                    // TODO: What to do on errors in general
-                    if oper_idx == 0 {
-                        // Error on AeActor, we'll be done
+
+                if oper_idx == 0 {
+                    // This messageis for the AE itself
+                    let rx = ae_actor_bi_dir_channels.our_channel.get_recv();
+                    if let Ok(msg_any) = oper.recv(rx).map_err(|why| {
+                        // TODO: What to do on errors in general
+                        // Error on our selves, we'll be done
                         println!(
-                            "AE:{}: {} error on recv: {why} `done = true`",
-                            ae.name,
-                            actor.name()
+                            "AE:{}: error on recv: {why} `done = true`",
+                            ae.name(),
                         );
-                        done = true;
-                    } else {
-                        // panic
-                        todo!("AE:{}: {} error on recv: {why}", ae.name, actor.name())
-                    }
-                }) {
-                    actor.process_msg_any(None, msg);
-                    if actor.done() {
-                        if oper_idx == 0 {
-                            println!(
-                                "AE:{}: {} reports done, stopping the AE",
-                                ae.name,
-                                actor.name()
-                            );
-                            done = actor.done();
+                        ae.done = true;
+                    }) {
+                        // This is a message for this ActorExecutor!!!
+                        if let Some(msg) = msg_any.downcast_ref::<MsgAeAddActor>() {
+                            println!("{}.prossess_msg_any: msg={msg:?}", ae.name());
+                        } else if let Some(msg) = msg_any.downcast_ref::<MsgAeDone>() {
+                            println!("{}.prossess_msg_any: msg={msg:?}", ae.name());
+                            ae.done = true;
+                        } else if let Some(msg) = msg_any.downcast_ref::<MsgGetTheirBiDirChannel>() {
+                            println!("{}.prossess_msg_any: msg={msg:?}", ae.name());
+                            if let Some(bdc) = ae.bi_dir_channels_vec.get(msg.handle) {
+                                let their_channel = bdc.their_channel.clone();
+                                let msg = Box::new(MsgReplyTheirBiDirChannel {
+                                    bi_dir_channel: Box::new(their_channel),
+                                });
+
+                                ae.bi_dir_channels_vec[0].our_channel.tx.send(msg).unwrap();
+                            } else {
+                                // TODO: Add Status field in MsgReplyTheirBiDirChannel
+                                println!("{}.prossess_msg_any: MsgGetTheirBiDirChannel bad handle={}", ae.name(), msg.handle);
+                            }
                         } else {
-                            // panic
-                            todo!(
-                                "AE:{}: {} reported done, what to do?",
-                                ae.name,
-                                actor.name()
-                            )
+                            println!("{}.prossess_msg_any: Uknown msg", ae.name());
                         }
                     }
-                };
+                } else {
+                    // This message for one of the actors running in the AE
+                    let actor = &mut ae.actor_vec[oper_idx - 1];
+                    let rx = ae.bi_dir_channels_vec[oper_idx - 1].our_channel.get_recv();
+                    if let Ok(msg_any) = oper.recv(rx).map_err(|why| {
+                        panic!("AE:{}: {} error on recv: {why}", ae.name, actor.name())
+                    }) {
+                        actor.process_msg_any(None, msg_any);
+                        if actor.done() {
+                            panic!("AE:{}: {} reported done, what to do?", ae.name, actor.name());
+                        }
+                    }
+                }
             }
 
             // TODO: Should we be cleaning things up, like telling the Manager?
@@ -194,48 +205,10 @@ impl ActorsExecutor {
 
         (join_handle, their_bi_dir_channel)
     }
-}
-
-#[derive(Debug)]
-struct AeActor {
-    done: bool,
-}
-
-impl AeActor {
-    pub fn new() -> Self {
-        Self { done: false }
-    }
-
-    fn done(&self) -> bool {
-        self.done
-    }
-}
-
-impl Actor for AeActor {
-    fn process_msg_any(&mut self, reply_tx: Option<&Sender<BoxMsgAny>>, msg_any: BoxMsgAny) {
-        if let Some(msg) = msg_any.downcast_ref::<MsgAeAddActor>() {
-            println!("{}.prossess_msg_any: msg={msg:?}", self.name());
-        } else if let Some(msg) = msg_any.downcast_ref::<MsgAeDone>() {
-            println!("{}.prossess_msg_any: msg={msg:?}", self.name());
-            self.done = true;
-        } else if let Some(msg) = msg_any.downcast_ref::<MsgGetTheirBiDirChannel>() {
-            println!("{}.prossess_msg_any: msg={msg:?}", self.name());
-            let bdc = self.get_bi_dir_channel_for_actor(msg.handle).unwrap();
-            let msg = Box::new(MsgReplyTheirBiDirChannel {
-                bi_dir_channel: Box::new(bdc),
-            });
-            reply_tx.unwrap().send(msg).unwrap();
-        } else {
-            println!("{}.prossess_msg_any: Uknown msg", self.name());
-        }
-    }
 
     fn name(&self) -> &str {
-        "AeActor"
-    }
-
-    fn done(&self) -> bool {
-        self.done()
+        // This needs an InstanceId
+        "ActorExecutor"
     }
 }
 
@@ -260,140 +233,184 @@ pub struct MsgReplyTheirBiDirChannel {
 #[derive(Debug)]
 pub struct MsgAeDone;
 
-#[derive(Debug)]
-pub enum ManagedActor {
-    TheActor(Box<dyn Actor>),
-    TheBiDirChannel(Box<BiDirLocalChannel>),
-}
+
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+pub struct InstanceId(usize);
 
 #[derive(Debug)]
-pub struct Manager {
-    actors: Vec<ManagedActor>,
+pub struct ConnMgr {
+    actors: HashMap<InstanceId, Box<BiDirLocalChannel>>,
 }
 
-impl Default for Manager {
+#[allow(unused)]
+#[derive(Debug)]
+pub struct MsgCmAddActor {
+    instance_id: InstanceId,
+    bdlc: Box<BiDirLocalChannel>, // TODO: Should this be Boxed or not?
+}
+
+#[allow(unused)]
+#[derive(Debug)]
+pub struct MsgCmReqBdlc {
+    instance_id: InstanceId,
+}
+
+#[allow(unused)]
+#[derive(Debug)]
+pub struct MsgCmRspBdlc {
+    bdlc: Option<Box<BiDirLocalChannel>>,
+}
+
+impl Default for ConnMgr {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Manager {
-    pub fn new() -> Manager {
-        Self { actors: vec![] }
+impl ConnMgr {
+    pub fn new() -> ConnMgr {
+        Self { actors: HashMap::new() }
     }
 
-    pub fn add_actor(&mut self, actor: Box<dyn Actor>) -> usize {
+    pub fn add_actor(&mut self, instance_id: InstanceId, bdlc: Box<BiDirLocalChannel>) -> usize {
         let idx = self.actors.len();
-        self.actors.push(ManagedActor::TheActor(actor));
+        self.actors.insert(instance_id, bdlc);
 
         idx
     }
 
-    pub fn get_bi_dir_channel_for_actor(
+    pub fn get_actor_bi_dir_channel(
         &self,
-        handle: usize,
-    ) -> Option<Box<dyn ActorBiDirChannel>> {
-        if let Some(ma) = self.actors.get(handle) {
-            match ma {
-                ManagedActor::TheActor(_) => None,
-                ManagedActor::TheBiDirChannel(tc) => Some(tc.clone()),
-            }
+        instance_id: InstanceId,
+    ) -> Option<Box<BiDirLocalChannel>> {
+        if let Some(bdlc) = self.actors.get(&instance_id) {
+            Some(bdlc.clone())
         } else {
             None
         }
     }
+}
 
-    // Need to make thread safe
-    pub fn own_actor(&mut self, handle: usize) -> Option<Box<dyn Actor>> {
-        if let Some(ma) = self.actors.get(handle) {
-            match ma {
-                ManagedActor::TheActor(_actor) => {
-                    let bdlcs = BiDirLocalChannels::new();
-
-                    // Replace the thing with it's channel
-                    let ma = std::mem::replace(
-                        &mut self.actors[handle],
-                        ManagedActor::TheBiDirChannel(Box::new(bdlcs.their_channel)),
-                    );
-                    return match ma {
-                        ManagedActor::TheActor(actor) => Some(actor),
-                        // This should/cannot ever happen!!
-                        _ => {
-                            panic!("Manager::own_thing: swap returned TheThing but this should never happen");
-                        }
-                    };
-                }
-                ManagedActor::TheBiDirChannel(_) => {
-                    // Already owned
-                    return None;
-                }
+impl Actor for ConnMgr {
+    fn process_msg_any(&mut self, rsp_tx: Option<&Sender<BoxMsgAny>>, msg_any: BoxMsgAny) {
+        if let Some(msg) = msg_any.downcast_ref::<MsgCmAddActor>() {
+            println!("{}.prossess_msg_any: msg={msg:?}", self.name());
+            self.add_actor(msg.instance_id.clone(), msg.bdlc.clone());
+        } else if let Some(msg) = msg_any.downcast_ref::<MsgCmReqBdlc>() {
+            if let Some(tx) = rsp_tx {
+                println!("{}.prossess_msg_any: msg={msg:?}", self.name());
+                let bdlc =  self.get_actor_bi_dir_channel(msg.instance_id.clone());
+                let msg = Box::new(MsgCmRspBdlc { bdlc });
+                tx.send(msg).unwrap();
+            } else {
+                println!("{}.prossess_msg_any: No rsp_tx for MsgCmReqBdlc", self.name());
             }
         } else {
-            return None;
+            println!("{}.prossess_msg_any: Uknown msg", self.name());
         }
+    }
+
+    fn name(&self) -> &str {
+        "ConnMgr"
+    }
+
+    fn done(&self) -> bool {
+        false
     }
 }
 
-//#[cfg(test)]
-//mod tests {
-//    use super::*;
-//
-//    #[derive(Debug)]
-//    struct MsgInc;
-//
-//    #[derive(Debug)]
-//    struct MsgGetCounter;
-//
-//    #[derive(Debug)]
-//    struct MsgReplyCounter {
-//        counter: i32,
-//    }
-//
-//    #[derive(Debug)]
-//    pub struct Thing {
-//        pub name: String,
-//        pub counter: i32,
-//    }
-//
-//    impl Thing {
-//        pub fn new(name: &str) -> Self {
-//            Self {
-//                name: name.to_string(),
-//                counter: 0,
-//            }
-//        }
-//
-//        pub fn increment(&mut self) {
-//            self.counter += 1;
-//            println!("Thing::increment: counter={}", self.counter);
-//        }
-//    }
-//
-//    impl Actor for Thing {
-//        fn process_msg_any(&mut self, reply_tx: Option<&Sender<BoxMsgAny>>, msg: BoxMsgAny) {
-//            if msg.downcast_ref::<MsgInc>().is_some() {
-//                self.increment()
-//            } else if msg.downcast_ref::<MsgGetCounter>().is_some() {
-//                let reply_tx = reply_tx.unwrap();
-//                reply_tx
-//                    .send(Box::new(MsgReplyCounter {
-//                        counter: self.counter,
-//                    }))
-//                    .unwrap();
-//            } else {
-//                println!("Thing.prossess_msg_any: Uknown msg");
-//            }
-//        }
-//
-//        fn name(&self) -> &str {
-//            self.name.as_str()
-//        }
-//
-//        fn done(&self) -> bool {
-//            false
-//        }
-//    }
-//
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug)]
+    struct MsgInc;
+
+    #[derive(Debug)]
+    struct MsgGetCounter;
+
+    #[derive(Debug)]
+    struct MsgReplyCounter {
+        #[allow(unused)]
+        counter: i32,
+    }
+
+    #[derive(Debug)]
+    pub struct Thing {
+        pub name: String,
+        pub counter: i32,
+    }
+
+    impl Thing {
+        pub fn new(name: &str) -> Self {
+            Self {
+                name: name.to_string(),
+                counter: 0,
+            }
+        }
+
+        pub fn increment(&mut self) {
+            self.counter += 1;
+            println!("Thing::increment: counter={}", self.counter);
+        }
+    }
+
+    impl Actor for Thing {
+        fn process_msg_any(&mut self, reply_tx: Option<&Sender<BoxMsgAny>>, msg: BoxMsgAny) {
+            if msg.downcast_ref::<MsgInc>().is_some() {
+                self.increment()
+            } else if msg.downcast_ref::<MsgGetCounter>().is_some() {
+                let reply_tx = reply_tx.unwrap();
+                reply_tx
+                    .send(Box::new(MsgReplyCounter {
+                        counter: self.counter,
+                    }))
+                    .unwrap();
+            } else {
+                println!("Thing.prossess_msg_any: Uknown msg");
+            }
+        }
+
+        fn name(&self) -> &str {
+            self.name.as_str()
+        }
+
+        fn done(&self) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn test_conn_mgr() {
+        println!("\ntest_conn_mgr:+");
+
+        // Start an ActorsExecutor
+        let (executor1_join_handle, executor1_tx) = ActorsExecutor::start("executor1");
+        println!("test_conn_mgr: executor1_tx={executor1_tx:?}");
+
+        // Create Actor Thing
+        let thing = Thing::new("t1");
+        println!("test_conn_mgr: thing1={thing:?}");
+
+        // Add Thing to the executor
+        let msg = Box::new(MsgAeAddActor {
+            actor: Box::new(thing),
+        });
+        executor1_tx.send(msg).unwrap();
+
+        ////t1_tx.send(Box::new(MsgInc{})).unwrap();
+        ////let msg = t1.channel.rx.recv().unwrap();
+        ////t1.process_msg_any(None, msg);
+        ////println!("test_conn_mgr: t1={t1:?}");
+
+        let msg = Box::new(MsgAeDone);
+        executor1_tx.send(msg).unwrap();
+
+        executor1_join_handle.join().unwrap();
+
+        println!("test_conn_mgr:-");
+    }
+
 //    #[test]
 //    fn test_non_threaded() {
 //        println!("\ntest_non_threaded:+");
@@ -455,5 +472,4 @@ impl Manager {
 //        //println!("main: t1={t1:?}");
 //        println!("test_executor:-");
 //    }
-//}
-//
+}
