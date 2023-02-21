@@ -33,51 +33,31 @@ test_conn_mgr: recv msg_any of MsgRspCounter
 ^C
 ```
 
-If I uncomment line 195 in src/main.rs:
+If I uncomment line 207 in src/lib.rs:
 ```
-   192	                            // This is the key to making ActorExecutor work, we need to add a
-   193	                            // new receiver for this Actor, but this causes two compile
-   194	                            // error[E0502]'s above, i.e. immutable and mutable borrows :(
-   195	                            selector.recv(x.our_channel.get_recv());
+   204	                                // This is the key to making ActorExecutor work, we need to add a
+   205	                                // new receiver for this Actor, but this causes compile error[E0502]
+   206	                                // above, i.e. immutable and mutable borrows :(
+   207	                                //selector.recv(x.our_channel.get_recv());
 ```
- I get two compile errors:
+ I get a compile error:
 ```
-wink@3900x 23-02-20T23:16:03.581Z:~/prgs/rust/myrepos/exper_ownership_of_managed_things (access_ae_from_ae_actor)
-$ cargo test -- --nocapture
+wink@3900x 23-02-20T23:57:59.886Z:~/prgs/rust/myrepos/exper_ownership_of_managed_things (main)
+$ cargo build
    Compiling exper_ownership_of_managed_things v0.1.0 (/home/wink/prgs/rust/myrepos/exper_ownership_of_managed_things)
-error[E0502]: cannot borrow `ae` as mutable because it is also borrowed as immutable
-   --> src/lib.rs:167:64
-    |
-159 |                 let oper = selector.select();
-    |                            ----------------- immutable borrow later used here
-...
-167 |                     if let Ok(msg_any) = oper.recv(rx).map_err(|why| {
-    |                                                                ^^^^^ mutable borrow occurs here
-...
-170 |                         println!("AE:{}: error on recv: {why} `done = true`", ae.name());
-    |                                                                               -- second borrow occurs due to use of `ae` in closure
-171 |                         ae.done = true;
-    |                         ------- capture is mutable because of use here
-...
-190 |                             let x = ae.bi_dir_channels_vec.get(actor_idx).unwrap();
-    |                                     ------------------------------------- immutable borrow occurs here
-
 error[E0502]: cannot borrow `ae.bi_dir_channels_vec` as mutable because it is also borrowed as immutable
-   --> src/lib.rs:188:29
+   --> src/lib.rs:201:33
     |
-188 | ...                   ae.bi_dir_channels_vec.push(bdlcs);
+201 | ...                   ae.bi_dir_channels_vec.push(bdlcs);
     |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ mutable borrow occurs here
-189 | ...
-190 | ...                   let x = ae.bi_dir_channels_vec.get(actor_idx).unwrap();
+202 | ...                   let x = ae.bi_dir_channels_vec.get(actor_idx).unwrap();
     |                               ------------------------------------- immutable borrow occurs here
 ...
-195 | ...                   selector.recv(x.our_channel.get_recv());
+207 | ...                   selector.recv(x.our_channel.get_recv());
     |                       --------------------------------------- immutable borrow later used here
 
 For more information about this error, try `rustc --explain E0502`.
-error: could not compile `exper_ownership_of_managed_things` due to 2 previous errors
-warning: build failed, waiting for other jobs to finish...
-error: could not compile `exper_ownership_of_managed_things` due to 2 previous errors
+error: could not compile `exper_ownership_of_managed_things` due to previous error
 ```
 
 ## License

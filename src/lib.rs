@@ -163,70 +163,83 @@ impl ActorsExecutor {
                     // This messageis for the AE itself
                     let rx = ae_actor_bi_dir_channels.our_channel.get_recv();
 
-                    // error[E0502]: cannot borrow `ae` as mutable because it is also borrowed as immutable
-                    if let Ok(msg_any) = oper.recv(rx).map_err(|why| {
-
-                        // TODO: Error on our selves make done, is there anything else we need to do?
-                        println!("AE:{}: error on recv: {why} `done = true`", ae.name());
-                        ae.done = true;
-                    }) {
-                        // This is a message for this ActorExecutor!!!
-                        if msg_any.downcast_ref::<MsgReqAeAddActor>().is_some() {
-                            // It is a MsgReqAeAddActor, now downcast to concrete message so we can push it to actor_vec
-                            let msg = msg_any.downcast::<MsgReqAeAddActor>().unwrap();
-                            println!("{}.prossess_msg_any: msg={msg:?}", ae.name());
-                            let actor_idx = ae.actor_vec.len();
-                            ae.actor_vec.push(msg.actor);
-
-                            // Create the bdlcs and add to bi_dir_channels_vec
-                            let bdlcs = BiDirLocalChannels::new();
-
-                            let x = ae.bi_dir_channels_vec.len();
-                            assert!(x == actor_idx);
-
-                            // error[E0502]: cannot borrow `ae.bi_dir_channels_vec` as mutable because it is also borrowed as immutable
-                            ae.bi_dir_channels_vec.push(bdlcs);
-
-                            let x = ae.bi_dir_channels_vec.get(actor_idx).unwrap();
-
-                            // This is the key to making ActorExecutor work, we need to add a
-                            // new receiver for this Actor, but this causes two compile
-                            // error[E0502]'s above, i.e. immutable and mutable borrows :(
-                            //selector.recv(x.our_channel.get_recv());
-
-                            // Send the response message and sending their_channel
-                            msg.rsp_tx.send(Box::new(MsgRspAeAddActor {
-                                bdlc: Box::new(x.their_channel.clone()),
-                            }));
-
-                            println!(
-                                "{}.prossess_msg_any: added new receiver for {}",
-                                ae.name(),
-                                ae.actor_vec[actor_idx].name()
-                            );
-                        } else if let Some(msg) = msg_any.downcast_ref::<MsgAeDone>() {
-                            println!("{}.prossess_msg_any: msg={msg:?}", ae.name());
+                    let result = oper.recv(rx);
+                    match result {
+                        Err(why) => {
+                            // TODO: Error on our selves make done, is there anything else we need to do?
+                            println!("AE:{}: error on recv: {why} `done = true`", ae.name());
                             ae.done = true;
-                        } else if let Some(msg) = msg_any.downcast_ref::<MsgGetTheirBiDirChannel>()
-                        {
-                            println!("{}.prossess_msg_any: msg={msg:?}", ae.name());
-                            if let Some(bdc) = ae.bi_dir_channels_vec.get(msg.handle) {
-                                let their_channel = bdc.their_channel.clone();
-                                let msg = Box::new(MsgReplyTheirBiDirChannel {
-                                    bi_dir_channel: Box::new(their_channel),
-                                });
+                        }
+                        Ok(msg_any) => {
+                            // This is a message for this ActorExecutor!!!
+                            if msg_any.downcast_ref::<MsgReqAeAddActor>().is_some() {
+                                // It is a MsgReqAeAddActor, now downcast to concrete message so we can push it to actor_vec
+                                let msg = msg_any.downcast::<MsgReqAeAddActor>().unwrap();
+                                println!("{}.prossess_msg_any: msg={msg:?}", ae.name());
+                                let actor_idx = ae.actor_vec.len();
+                                ae.actor_vec.push(msg.actor);
 
-                                ae.bi_dir_channels_vec[0].our_channel.tx.send(msg).unwrap();
-                            } else {
-                                // TODO: Add Status field in MsgReplyTheirBiDirChannel
+                                // Create the bdlcs and add to bi_dir_channels_vec
+                                let bdlcs = BiDirLocalChannels::new();
+
+                                let x = ae.bi_dir_channels_vec.len();
+                                assert!(x == actor_idx);
+
+                                // wink@3900x 23-02-20T23:49:31.197Z:~/prgs/rust/myrepos/exper_ownership_of_managed_things (main)
+                                // $ cargo build
+                                // Compiling exper_ownership_of_managed_things v0.1.0 (/home/wink/prgs/rust/myrepos/exper_ownership_of_managed_things)
+                                // error[E0502]: cannot borrow `ae.bi_dir_channels_vec` as mutable because it is also borrowed as immutable
+                                // --> src/lib.rs:190:33
+                                //     |
+                                // 201 | ...                   ae.bi_dir_channels_vec.push(bdlcs);
+                                //     |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ mutable borrow occurs here
+                                // 202 | ...                   let x = ae.bi_dir_channels_vec.get(actor_idx).unwrap();
+                                //     |                               ------------------------------------- immutable borrow occurs here
+                                // ...
+                                // 207 | ...                   selector.recv(x.our_channel.get_recv());
+                                //     |                       --------------------------------------- immutable borrow later used here
+                                ae.bi_dir_channels_vec.push(bdlcs);
+                                let x = ae.bi_dir_channels_vec.get(actor_idx).unwrap();
+
+                                // This is the key to making ActorExecutor work, we need to add a
+                                // new receiver for this Actor, but this causes compile error[E0502]
+                                // above, i.e. immutable and mutable borrows :(
+                                //selector.recv(x.our_channel.get_recv());
+
+                                // Send the response message and sending their_channel
+                                msg.rsp_tx.send(Box::new(MsgRspAeAddActor {
+                                    bdlc: Box::new(x.their_channel.clone()),
+                                }));
+
                                 println!(
-                                    "{}.prossess_msg_any: MsgGetTheirBiDirChannel bad handle={}",
+                                    "{}.prossess_msg_any: added new receiver for {}",
                                     ae.name(),
-                                    msg.handle
+                                    ae.actor_vec[actor_idx].name()
                                 );
+                            } else if let Some(msg) = msg_any.downcast_ref::<MsgAeDone>() {
+                                println!("{}.prossess_msg_any: msg={msg:?}", ae.name());
+                                ae.done = true;
+                            } else if let Some(msg) = msg_any.downcast_ref::<MsgGetTheirBiDirChannel>()
+                            {
+                                println!("{}.prossess_msg_any: msg={msg:?}", ae.name());
+                                if let Some(bdc) = ae.bi_dir_channels_vec.get(msg.handle) {
+                                    let their_channel = bdc.their_channel.clone();
+                                    let msg = Box::new(MsgReplyTheirBiDirChannel {
+                                        bi_dir_channel: Box::new(their_channel),
+                                    });
+
+                                    ae.bi_dir_channels_vec[0].our_channel.tx.send(msg).unwrap();
+                                } else {
+                                    // TODO: Add Status field in MsgReplyTheirBiDirChannel
+                                    println!(
+                                        "{}.prossess_msg_any: MsgGetTheirBiDirChannel bad handle={}",
+                                        ae.name(),
+                                        msg.handle
+                                    );
+                                }
+                            } else {
+                                println!("{}.prossess_msg_any: Uknown msg", ae.name());
                             }
-                        } else {
-                            println!("{}.prossess_msg_any: Uknown msg", ae.name());
                         }
                     }
                 } else {
