@@ -67,14 +67,16 @@ pub struct BiDirLocalChannels {
 }
 
 impl BiDirLocalChannels {
-    pub fn new() -> Box<Self> {
+    //pub fn new() -> Box<Self> {
+    pub fn new() -> Self {
         // left_tx -----> right_rx
         let (left_tx, right_rx) = unbounded();
 
         // left_rx <---- right_tx
         let (right_tx, left_rx) = unbounded();
 
-        Box::new(Self {
+        //Box::new(Self {
+        Self {
             their_channel: BiDirLocalChannel {
                 self_tx: right_tx.clone(),
                 tx: left_tx.clone(),
@@ -85,7 +87,8 @@ impl BiDirLocalChannels {
                 tx: right_tx,
                 rx: right_rx,
             },
-        })
+        }
+        //})
     }
 }
 
@@ -126,7 +129,8 @@ impl ActorBiDirChannel for BiDirLocalChannel {
 struct ActorsExecutor {
     pub name: String,
     pub actor_vec: Vec<Box<dyn Actor>>,
-    pub bi_dir_channels_vec: Vec<Box<BiDirLocalChannels>>,
+    //pub bi_dir_channels_vec: Vec<Box<BiDirLocalChannels>>,
+    pub bi_dir_channels_vec: Vec<BiDirLocalChannels>,
     done: bool,
 }
 
@@ -199,16 +203,21 @@ impl ActorsExecutor {
                                 // 207 | ...                   selector.recv(x.our_channel.get_recv());
                                 //     |                       --------------------------------------- immutable borrow later used here
                                 ae.bi_dir_channels_vec.push(bdlcs);
-                                let x = ae.bi_dir_channels_vec.get(actor_idx).unwrap();
+                                let rx = &ae.bi_dir_channels_vec[actor_idx].our_channel.rx;
+                                let tc = ae.bi_dir_channels_vec[actor_idx].their_channel.clone();
+
 
                                 // This is the key to making ActorExecutor work, we need to add a
                                 // new receiver for this Actor, but this causes compile error[E0502]
                                 // above, i.e. immutable and mutable borrows :(
                                 //selector.recv(x.our_channel.get_recv());
+                                //let x = oc.get_recv();
+                                //selector.recv(rx);
 
                                 // Send the response message and sending their_channel
                                 msg.rsp_tx.send(Box::new(MsgRspAeAddActor {
-                                    bdlc: Box::new(x.their_channel.clone()),
+                                    //bdlc: Box::new(x.their_channel.clone()),
+                                    bdlc: Box::new(tc),
                                 }));
 
                                 println!(
