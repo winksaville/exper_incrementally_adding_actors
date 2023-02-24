@@ -1,14 +1,5 @@
-//! Need to add ActorExecutor MsgAddActor -> MsgReplyActor
-//! Need to add Manager MsgAddActor -> MsgReplyActor
-//! Need to add Manager MsgGetActor -> MsgReplyActor
-//!
-//! Need messages:
-//!   MsgAddActor { actor_id: ActorInstanceId, their_channel: BiDirLocalChannel }
-//!   MsgGetActor { actor_ActorInscneId }
-//!   MsgReplyActor { actor_id: ActorInstanceId, their_channel: BiDirLocalChannel }
-//!
-//!
 use std::{
+    cell::UnsafeCell,
     collections::HashMap,
     fmt::Debug,
     thread::{self, JoinHandle},
@@ -18,8 +9,51 @@ use crossbeam_channel::{unbounded, Receiver, Select, Sender};
 
 pub type BoxMsgAny = Box<dyn std::any::Any + Send>;
 
+/// Receiver References using interior mutability
+#[allow(unused)]
+#[derive(Debug)]
+struct VecBdlcs(UnsafeCell<Vec<BiDirLocalChannels>>);
+
+#[allow(unused)]
+impl VecBdlcs {
+    pub fn new() -> Self {
+        Self(UnsafeCell::new(Vec::new()))
+    }
+
+    // Panic's if idx is out of bounds
+    pub fn get(&self, idx: usize) -> &BiDirLocalChannels {
+        println!("Refs.get({idx}):+");
+        let bdlcs = unsafe {
+            let v = &*self.0.get();
+            &v[idx]
+        };
+        println!("Refs.get({idx}): bdlcs={bdlcs:?}");
+        bdlcs
+    }
+
+    pub fn push(&self, v: Box<BiDirLocalChannels>) {
+        println!("Refs.push({v:?}):+");
+        unsafe {
+            let ptr = &mut *self.0.get();
+            ptr.push(*v);
+        }
+        println!("Refs.push():-");
+    }
+
+    pub fn len(&self) -> usize {
+        println!("Refs.len():+");
+        let len = unsafe {
+            let v = &*self.0.get();
+            v.len()
+        };
+        println!("Refs.len():- {len}");
+
+        len
+    }
+}
+
 pub trait Actor: Send + Debug + Sync {
-    fn process_msg_any(&mut self, reply_tx: Option<&Sender<BoxMsgAny>>, msg: BoxMsgAny);
+    fn process_msg_any(&mut self, rsp_tx: Option<&Sender<BoxMsgAny>>, msg: BoxMsgAny);
     fn name(&self) -> &str;
     fn done(&self) -> bool;
     fn get_bi_dir_channel_for_actor(&self, _handle: usize) -> Option<BiDirLocalChannel> {
@@ -126,7 +160,7 @@ impl ActorBiDirChannel for BiDirLocalChannel {
 struct ActorsExecutor {
     pub name: String,
     pub actor_vec: Vec<Box<dyn Actor>>,
-    pub bi_dir_channels_vec: Vec<Box<BiDirLocalChannels>>,
+    pub bi_dir_channels_vec: VecBdlcs, //Vec<Box<BiDirLocalChannels>>,
     done: bool,
 }
 
@@ -145,7 +179,7 @@ impl ActorsExecutor {
             let mut ae = Self {
                 name: name.to_string(),
                 actor_vec: Vec::new(),
-                bi_dir_channels_vec: Vec::new(),
+                bi_dir_channels_vec: VecBdlcs::new(),
                 done: false,
             };
             println!("AE:{}:+", ae.name);
@@ -167,90 +201,79 @@ impl ActorsExecutor {
                     match result {
                         Err(why) => {
                             // TODO: Error on our selves make done, is there anything else we need to do?
-                            println!("AE:{}: error on recv: {why} `done = true`", ae.name());
+                            println!("AE:{}: error on recv: {why} `done = true`", ae.name);
                             ae.done = true;
                         }
                         Ok(msg_any) => {
                             // This is a message for this ActorExecutor!!!
+                            println!("{}: msg_any={msg_any:?}", ae.name);
                             if msg_any.downcast_ref::<MsgReqAeAddActor>().is_some() {
                                 // It is a MsgReqAeAddActor, now downcast to concrete message so we can push it to actor_vec
                                 let msg = msg_any.downcast::<MsgReqAeAddActor>().unwrap();
-                                println!("{}.prossess_msg_any: msg={msg:?}", ae.name());
+                                println!("{}: msg={msg:?}", ae.name);
                                 let actor_idx = ae.actor_vec.len();
                                 ae.actor_vec.push(msg.actor);
 
                                 // Create the bdlcs and add to bi_dir_channels_vec
+                                println!("{}: create BiDirLocalChannels", ae.name());
                                 let bdlcs = BiDirLocalChannels::new();
 
-                                let x = ae.bi_dir_channels_vec.len();
-                                assert!(x == actor_idx);
+                                assert_eq!(ae.bi_dir_channels_vec.len(), actor_idx);
 
-                                // wink@3900x 23-02-20T23:49:31.197Z:~/prgs/rust/myrepos/exper_ownership_of_managed_things (main)
-                                // $ cargo build
-                                // Compiling exper_ownership_of_managed_things v0.1.0 (/home/wink/prgs/rust/myrepos/exper_ownership_of_managed_things)
-                                // error[E0502]: cannot borrow `ae.bi_dir_channels_vec` as mutable because it is also borrowed as immutable
-                                // --> src/lib.rs:190:33
-                                //     |
-                                // 201 | ...                   ae.bi_dir_channels_vec.push(bdlcs);
-                                //     |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ mutable borrow occurs here
-                                // 202 | ...                   let x = ae.bi_dir_channels_vec.get(actor_idx).unwrap();
-                                //     |                               ------------------------------------- immutable borrow occurs here
-                                // ...
-                                // 207 | ...                   selector.recv(x.our_channel.get_recv());
-                                //     |                       --------------------------------------- immutable borrow later used here
                                 ae.bi_dir_channels_vec.push(bdlcs);
-                                let x = ae.bi_dir_channels_vec.get(actor_idx).unwrap();
+                                let bdlcs = ae.bi_dir_channels_vec.get(actor_idx);
 
-                                // This is the key to making ActorExecutor work, we need to add a
-                                // new receiver for this Actor, but this causes compile error[E0502]
-                                // above, i.e. immutable and mutable borrows :(
-                                //selector.recv(x.our_channel.get_recv());
+                                println!("{}: selector.recv(our_channel.get_recv())", ae.name());
+                                selector.recv(bdlcs.our_channel.get_recv());
 
-                                // Send the response message and sending their_channel
-                                msg.rsp_tx.send(Box::new(MsgRspAeAddActor {
-                                    bdlc: Box::new(x.their_channel.clone()),
-                                }));
+                                // Send the response message with their_channel
+                                let msg_rsp = Box::new(MsgRspAeAddActor {
+                                    bdlc: Box::new(bdlcs.their_channel.clone()),
+                                });
+                                println!("{}: msg.rsp_tx.send msg={msg_rsp:?}", ae.name());
+                                msg.rsp_tx.send(msg_rsp);
 
                                 println!(
-                                    "{}.prossess_msg_any: added new receiver for {}",
+                                    "{}: added new receiver for {}",
                                     ae.name(),
                                     ae.actor_vec[actor_idx].name()
                                 );
                             } else if let Some(msg) = msg_any.downcast_ref::<MsgAeDone>() {
-                                println!("{}.prossess_msg_any: msg={msg:?}", ae.name());
+                                println!("{}: msg={msg:?}", ae.name());
                                 ae.done = true;
-                            } else if let Some(msg) = msg_any.downcast_ref::<MsgGetTheirBiDirChannel>()
+                            } else if let Some(msg) =
+                                msg_any.downcast_ref::<MsgReqTheirBiDirChannel>()
                             {
-                                println!("{}.prossess_msg_any: msg={msg:?}", ae.name());
-                                if let Some(bdc) = ae.bi_dir_channels_vec.get(msg.handle) {
-                                    let their_channel = bdc.their_channel.clone();
-                                    let msg = Box::new(MsgReplyTheirBiDirChannel {
-                                        bi_dir_channel: Box::new(their_channel),
-                                    });
+                                println!("{}: msg={msg:?}", ae.name());
+                                let bdc = ae.bi_dir_channels_vec.get(msg.handle);
+                                let their_channel = bdc.their_channel.clone();
+                                let msg_rsp = Box::new(MsgRspTheirBiDirChannel {
+                                    bi_dir_channel: Box::new(their_channel),
+                                });
 
-                                    ae.bi_dir_channels_vec[0].our_channel.tx.send(msg).unwrap();
-                                } else {
-                                    // TODO: Add Status field in MsgReplyTheirBiDirChannel
-                                    println!(
-                                        "{}.prossess_msg_any: MsgGetTheirBiDirChannel bad handle={}",
-                                        ae.name(),
-                                        msg.handle
-                                    );
-                                }
+                                panic!("{}: ****** Need rsp_tx, probably add it to MsgReqTheirBiDirChannel???", ae.name());
+                                // send msg_rsp
                             } else {
-                                println!("{}.prossess_msg_any: Uknown msg", ae.name());
+                                println!("{}: Uknown msg", ae.name());
                             }
                         }
                     }
                 } else {
                     // This message for one of the actors running in the AE
-                    let actor = &mut ae.actor_vec[oper_idx - 1];
-                    let rx = ae.bi_dir_channels_vec[oper_idx - 1].our_channel.get_recv();
+                    let actor_idx = oper_idx - 1;
+                    let actor = &mut ae.actor_vec[actor_idx];
+                    println!(
+                        "{}: msg for actor_vec[{actor_idx}] {}",
+                        ae.name,
+                        actor.name()
+                    );
+                    let bdlcs = ae.bi_dir_channels_vec.get(actor_idx);
+                    let rx = bdlcs.our_channel.get_recv();
                     if let Ok(msg_any) = oper.recv(rx).map_err(|why| {
                         // TODO: What should we do here?
-                        panic!("AE:{}: {} error on recv: {why}", ae.name, actor.name())
+                        panic!("{}: {} error on recv: {why}", ae.name, actor.name())
                     }) {
-                        actor.process_msg_any(None, msg_any);
+                        actor.process_msg_any(Some(&bdlcs.our_channel.tx), msg_any);
                         if actor.done() {
                             panic!(
                                 "AE:{}: {} reported done, what to do?",
@@ -290,13 +313,13 @@ pub struct MsgRspAeAddActor {
 
 #[allow(unused)]
 #[derive(Debug)]
-pub struct MsgGetTheirBiDirChannel {
+pub struct MsgReqTheirBiDirChannel {
     handle: usize,
 }
 
 #[allow(unused)]
 #[derive(Debug)]
-pub struct MsgReplyTheirBiDirChannel {
+pub struct MsgRspTheirBiDirChannel {
     bi_dir_channel: Box<BiDirLocalChannel>,
 }
 
@@ -406,6 +429,7 @@ pub fn recv_bdlc(rx: &Receiver<BoxMsgAny>) -> Box<BiDirLocalChannel> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    //use crossbeam_channel::{unbounded};
 
     #[derive(Debug)]
     struct MsgInc;
@@ -440,12 +464,12 @@ mod tests {
     }
 
     impl Actor for Thing {
-        fn process_msg_any(&mut self, reply_tx: Option<&Sender<BoxMsgAny>>, msg: BoxMsgAny) {
+        fn process_msg_any(&mut self, rsp_tx: Option<&Sender<BoxMsgAny>>, msg: BoxMsgAny) {
             if msg.downcast_ref::<MsgInc>().is_some() {
                 self.increment()
             } else if msg.downcast_ref::<MsgReqCounter>().is_some() {
-                let reply_tx = reply_tx.unwrap();
-                reply_tx
+                let rsp_tx = rsp_tx.unwrap();
+                rsp_tx
                     .send(Box::new(MsgRspCounter {
                         counter: self.counter,
                     }))
@@ -467,7 +491,7 @@ mod tests {
     #[test]
     fn test_conn_mgr() {
         println!("\ntest_conn_mgr:+");
-        let (tx, rx) = unbounded();
+        let (tx, rx) = unbounded::<BoxMsgAny>();
 
         // Start an ActorsExecutor
         let (executor1_join_handle, executor1_tx) = ActorsExecutor::start("executor1");
@@ -496,15 +520,20 @@ mod tests {
 
         println!("test_conn_mgr: recv msg_any of MsgRspCounter");
         let msg_any = thing_bdlc.recv().unwrap();
-        println!("test_conn_mgr: recvd {msg_any:?} of MsgRspCounter");
+        println!("test_conn_mgr: recvd {msg_any:?} which should be a MsgRspCounter");
 
         let msg = msg_any.downcast_ref::<MsgRspCounter>().unwrap();
         println!("test_conn_mgr: msg_any.downcast_ref to {msg:?}");
+        assert_eq!(msg.counter, 1);
 
+        println!("test_conn_mgr: send MsgDone");
         let msg = Box::new(MsgAeDone);
         executor1_tx.send(msg).unwrap();
+        println!("test_conn_mgr: sent MsgDone");
 
+        println!("test_conn_mgr: join executor1 to complete");
         executor1_join_handle.join().unwrap();
+        println!("test_conn_mgr: join executor1 to completed");
 
         println!("test_conn_mgr:-");
     }
@@ -529,13 +558,13 @@ mod tests {
     //        let msg_any = t1_rx.recv().unwrap();
     //        t1.process_msg_any(None, msg_any);
     //
-    //        // Create a second reply channel and process MsgGetCounter and recv MsgReplyCounter
+    //        // Create a second response channel and process MsgReqCounter and recv MsgRspCounter
     //        let (tx, rx) = unbounded::<BoxMsgAny>();
-    //        t1.process_msg_any(Some(&tx), Box::new(MsgGetCounter));
+    //        t1.process_msg_any(Some(&tx), Box::new(MsgReqCounter));
     //        let msg_any = rx.recv().unwrap();
-    //        let msg_reply_counter = msg_any.downcast_ref::<MsgReplyCounter>().unwrap();
-    //        println!("test_non_threaded:- MsgReplyCounter={msg_reply_counter:?}");
-    //        assert_eq!(msg_reply_counter.counter, 1);
+    //        let msg_rsp_counter = msg_any.downcast_ref::<MsgRspCounter>().unwrap();
+    //        println!("test_non_threaded:- MsgRspCounter={msg_rsp_counter:?}");
+    //        assert_eq!(msg_rsp_counter.counter, 1);
     //    }
     //
     //    #[test]
