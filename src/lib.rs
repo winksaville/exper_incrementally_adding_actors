@@ -491,17 +491,17 @@ mod tests {
     }
 
     #[test]
-    fn test_conn_mgr() {
-        println!("\ntest_conn_mgr:+");
+    fn test_msg_req_add_actor() {
+        println!("\ntest_msg_req_add_actor:+");
         let (tx, rx) = unbounded::<BoxMsgAny>();
 
         // Start an ActorsExecutor
         let (executor1_join_handle, executor1_tx) = ActorsExecutor::start("executor1");
-        println!("test_conn_mgr: executor1_tx={executor1_tx:?}");
+        println!("test_msg_req_add_actor: executor1_tx={executor1_tx:?}");
 
         // Create Actor Thing
         let thing = Thing::new("t1");
-        println!("test_conn_mgr: thing1={thing:?}");
+        println!("test_msg_req_add_actor: thing1={thing:?}");
 
         // Add Thing to the executor
         let msg = Box::new(MsgReqAeAddActor {
@@ -510,95 +510,33 @@ mod tests {
         });
         executor1_tx.send(msg).unwrap();
         let thing_bdlc = recv_bdlc(&rx);
-        println!("test_conn_mgr: thing_bdlc={thing_bdlc:?}");
+        println!("test_msg_req_add_actor: thing_bdlc={thing_bdlc:?}");
 
-        println!("test_conn_mgr: send MsgInc");
+        println!("test_msg_req_add_actor: send MsgInc");
         thing_bdlc.send(Box::new(MsgInc)).unwrap();
-        println!("test_conn_mgr: sent MsgInc");
+        println!("test_msg_req_add_actor: sent MsgInc");
 
-        println!("test_conn_mgr: send MsgReqCounter");
+        println!("test_msg_req_add_actor: send MsgReqCounter");
         thing_bdlc.send(Box::new(MsgReqCounter)).unwrap();
-        println!("test_conn_mgr: sent MsgReqCounter");
+        println!("test_msg_req_add_actor: sent MsgReqCounter");
 
-        println!("test_conn_mgr: recv msg_any of MsgRspCounter");
+        println!("test_msg_req_add_actor: recv msg_any of MsgRspCounter");
         let msg_any = thing_bdlc.recv().unwrap();
-        println!("test_conn_mgr: recvd {msg_any:?} which should be a MsgRspCounter");
+        println!("test_msg_req_add_actor: recvd {msg_any:?} which should be a MsgRspCounter");
 
         let msg = msg_any.downcast_ref::<MsgRspCounter>().unwrap();
-        println!("test_conn_mgr: msg_any.downcast_ref to {msg:?}");
+        println!("test_msg_req_add_actor: msg_any.downcast_ref to {msg:?}");
         assert_eq!(msg.counter, 1);
 
-        println!("test_conn_mgr: send MsgDone");
+        println!("test_msg_req_add_actor: send MsgDone");
         let msg = Box::new(MsgAeDone);
         executor1_tx.send(msg).unwrap();
-        println!("test_conn_mgr: sent MsgDone");
+        println!("test_msg_req_add_actor: sent MsgDone");
 
-        println!("test_conn_mgr: join executor1 to complete");
+        println!("test_msg_req_add_actor: join executor1 to complete");
         executor1_join_handle.join().unwrap();
-        println!("test_conn_mgr: join executor1 to completed");
+        println!("test_msg_req_add_actor: join executor1 to completed");
 
-        println!("test_conn_mgr:-");
+        println!("test_msg_req_add_actor:-");
     }
-
-    //    #[test]
-    //    fn test_non_threaded() {
-    //        println!("\ntest_non_threaded:+");
-    //        let thing = Box::new(Thing::new("t1"));
-    //        println!("test_non_threaded: thing1={thing:?}");
-    //        let mut manager = Manager::new();
-    //        println!("test_non_threaded: new manager={manager:?}");
-    //        let t1_handle = manager.add_actor(thing);
-    //        println!("test_non_threaded: t1_handle={t1_handle} manager={manager:?}");
-    //
-    //        // Send MsgInc
-    //        let mut t1 = manager.own_actor(t1_handle).unwrap();
-    //        let t1_tx = manager.get_tx_for_thing(t1_handle).unwrap();
-    //        t1_tx.send(Box::new(MsgInc {})).unwrap();
-    //
-    //        // Recv MsgInc and process
-    //        let t1_rx = manager.get_rx_for_thing(t1_handle).unwrap();
-    //        let msg_any = t1_rx.recv().unwrap();
-    //        t1.process_msg_any(None, msg_any);
-    //
-    //        // Create a second response channel and process MsgReqCounter and recv MsgRspCounter
-    //        let (tx, rx) = unbounded::<BoxMsgAny>();
-    //        t1.process_msg_any(Some(&tx), Box::new(MsgReqCounter));
-    //        let msg_any = rx.recv().unwrap();
-    //        let msg_rsp_counter = msg_any.downcast_ref::<MsgRspCounter>().unwrap();
-    //        println!("test_non_threaded:- MsgRspCounter={msg_rsp_counter:?}");
-    //        assert_eq!(msg_rsp_counter.counter, 1);
-    //    }
-    //
-    //    #[test]
-    //    fn test_executor() {
-    //        println!("\ntest_executor:+");
-    //        let (executor1_join_handle, executor1_tx) = ActorsExecutor::start("executor1");
-    //        println!("test_executor: executor1_tx={executor1_tx:?}");
-    //
-    //        let thing = Thing::new("t1");
-    //        println!("test_executor: thing1={thing:?}");
-    //        //let mut manager = Manager::new();
-    //        //println!("main: new manager={manager:?}");
-    //        //let t1_handle = manager.add_thing(thing);
-    //        //println!("main: t1_handle={t1_handle} manager={manager:?}");
-    //
-    //        //let mut t1 = manager.own_thing(t1_handle).unwrap();
-    //        //let t1_tx = manager.get_tx_for_thing(t1_handle).unwrap();
-    //
-    //        let msg = Box::new(MsgReqAeAddActor {
-    //            actor: Box::new(thing),
-    //        });
-    //        executor1_tx.send(msg).unwrap();
-    //
-    //        let msg = Box::new(MsgAeDone);
-    //        executor1_tx.send(msg).unwrap();
-    //
-    //        executor1_join_handle.join().unwrap();
-    //
-    //        //t1_tx.send(Box::new(MsgInc{})).unwrap();
-    //        //let msg = t1.channel.rx.recv().unwrap();
-    //        //t1.process_msg_any(None, msg);
-    //        //println!("main: t1={t1:?}");
-    //        println!("test_executor:-");
-    //    }
 }
