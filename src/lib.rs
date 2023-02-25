@@ -473,24 +473,28 @@ mod tests {
 
     impl Actor for Thing {
         fn process_msg_any(&mut self, rsp_tx: Option<&Sender<BoxMsgAny>>, msg_any: BoxMsgAny) {
-            if msg_any.downcast_ref::<MsgInc>().is_some() {
-                println!("{}.process_msg_any: MsgInc", self.name());
-                self.increment()
-            } else if msg_any.downcast_ref::<MsgReqCounter>().is_some() {
-                println!("{}.process_msg_any: MsgReqCounter", self.name());
-                let rsp_tx = rsp_tx.unwrap();
-                rsp_tx
-                    .send(Box::new(MsgRspCounter {
-                        counter: self.counter,
-                    }))
-                    .unwrap();
-                self.increment()
-            } else if msg_any.downcast_ref::<MsgReqHello>().is_some() {
-                println!("{}.process_msg_any: MsgReqHello", self.name());
-                let rsp_tx = rsp_tx.unwrap();
-                rsp_tx.send(Box::new(MsgRspHello)).unwrap();
-            } else {
-                println!("{}.prossess_msg_any: Uknown msg", self.name());
+            match msg_any {
+                ma if ma.downcast_ref::<MsgInc>().is_some() => {
+                    println!("{}.process_msg_any: MsgInc", self.name());
+                    self.increment();
+                }
+                ma if ma.downcast_ref::<MsgReqCounter>().is_some() => {
+                    println!("{}.process_msg_any: MsgReqCounter", self.name());
+                    let rsp_tx = rsp_tx.unwrap();
+                    rsp_tx
+                        .send(Box::new(MsgRspCounter {
+                            counter: self.counter,
+                        }))
+                        .unwrap();
+                }
+                ma if ma.downcast_ref::<MsgReqHello>().is_some() => {
+                    println!("{}.process_msg_any: MsgReqHello", self.name());
+                    let rsp_tx = rsp_tx.unwrap();
+                    rsp_tx.send(Box::new(MsgRspHello)).unwrap();
+                }
+                _ => {
+                    println!("{}.prossess_msg_any: Uknown msg", self.name());
+                }
             }
         }
 
