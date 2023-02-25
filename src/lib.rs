@@ -251,8 +251,9 @@ impl ActorsExecutor {
                                     bi_dir_channel: Box::new(their_channel),
                                 });
 
-                                panic!("{}: ****** Need rsp_tx, probably add it to MsgReqTheirBiDirChannel???", ae.name());
                                 // send msg_rsp
+                                println!("{}: send msg_rsp={msg_rsp:?}", ae.name());
+                                msg.rsp_tx.send(msg_rsp).unwrap();
                             } else {
                                 println!("{}: Uknown msg", ae.name());
                             }
@@ -315,6 +316,7 @@ pub struct MsgRspAeAddActor {
 #[derive(Debug)]
 pub struct MsgReqTheirBiDirChannel {
     handle: usize,
+    rsp_tx: Sender<BoxMsgAny>,
 }
 
 #[allow(unused)]
