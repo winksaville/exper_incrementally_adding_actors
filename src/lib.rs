@@ -434,6 +434,12 @@ mod tests {
     //use crossbeam_channel::{unbounded};
 
     #[derive(Debug)]
+    struct MsgReqHello;
+
+    #[derive(Debug)]
+    struct MsgRspHello;
+
+    #[derive(Debug)]
     struct MsgInc;
 
     #[derive(Debug)]
@@ -468,16 +474,23 @@ mod tests {
     impl Actor for Thing {
         fn process_msg_any(&mut self, rsp_tx: Option<&Sender<BoxMsgAny>>, msg: BoxMsgAny) {
             if msg.downcast_ref::<MsgInc>().is_some() {
+                println!("{}.process_msg_any: MsgInc", self.name());
                 self.increment()
             } else if msg.downcast_ref::<MsgReqCounter>().is_some() {
+                println!("{}.process_msg_any: MsgReqCounter", self.name());
                 let rsp_tx = rsp_tx.unwrap();
                 rsp_tx
                     .send(Box::new(MsgRspCounter {
                         counter: self.counter,
                     }))
                     .unwrap();
+                self.increment()
+            } else if msg.downcast_ref::<MsgReqHello>().is_some() {
+                println!("{}.process_msg_any: MsgReqHello", self.name());
+                let rsp_tx = rsp_tx.unwrap();
+                rsp_tx.send(Box::new(MsgRspHello)).unwrap();
             } else {
-                println!("Thing.prossess_msg_any: Uknown msg");
+                println!("{}.prossess_msg_any: Uknown msg", self.name());
             }
         }
 
@@ -511,6 +524,15 @@ mod tests {
         executor1_tx.send(msg).unwrap();
         let thing_bdlc = recv_bdlc(&rx);
         println!("test_msg_req_add_actor: thing_bdlc={thing_bdlc:?}");
+
+        println!("test_msg_req_add_actor: send MsgReqHello");
+        thing_bdlc.send(Box::new(MsgReqHello)).unwrap();
+        println!("test_msg_req_add_actor: sent MsgReqHello");
+
+        println!("test_msg_req_add_actor: wait MsgRspHello");
+        let msg_any = thing_bdlc.recv().unwrap();
+        println!("test_msg_req_add_actor: recv MsgRspHello");
+        assert!(msg_any.downcast_ref::<MsgRspHello>().is_some());
 
         println!("test_msg_req_add_actor: send MsgInc");
         thing_bdlc.send(Box::new(MsgInc)).unwrap();
