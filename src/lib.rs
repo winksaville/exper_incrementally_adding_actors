@@ -53,7 +53,7 @@ impl VecBdlcs {
 }
 
 pub trait Actor: Send + Debug + Sync {
-    fn process_msg_any(&mut self, rsp_tx: Option<&Sender<BoxMsgAny>>, msg: BoxMsgAny);
+    fn process_msg_any(&mut self, rsp_tx: Option<&Sender<BoxMsgAny>>, msg_any: BoxMsgAny);
     fn name(&self) -> &str;
     fn done(&self) -> bool;
     fn get_bi_dir_channel_for_actor(&self, _handle: usize) -> Option<BiDirLocalChannel> {
@@ -472,11 +472,11 @@ mod tests {
     }
 
     impl Actor for Thing {
-        fn process_msg_any(&mut self, rsp_tx: Option<&Sender<BoxMsgAny>>, msg: BoxMsgAny) {
-            if msg.downcast_ref::<MsgInc>().is_some() {
+        fn process_msg_any(&mut self, rsp_tx: Option<&Sender<BoxMsgAny>>, msg_any: BoxMsgAny) {
+            if msg_any.downcast_ref::<MsgInc>().is_some() {
                 println!("{}.process_msg_any: MsgInc", self.name());
                 self.increment()
-            } else if msg.downcast_ref::<MsgReqCounter>().is_some() {
+            } else if msg_any.downcast_ref::<MsgReqCounter>().is_some() {
                 println!("{}.process_msg_any: MsgReqCounter", self.name());
                 let rsp_tx = rsp_tx.unwrap();
                 rsp_tx
@@ -485,7 +485,7 @@ mod tests {
                     }))
                     .unwrap();
                 self.increment()
-            } else if msg.downcast_ref::<MsgReqHello>().is_some() {
+            } else if msg_any.downcast_ref::<MsgReqHello>().is_some() {
                 println!("{}.process_msg_any: MsgReqHello", self.name());
                 let rsp_tx = rsp_tx.unwrap();
                 rsp_tx.send(Box::new(MsgRspHello)).unwrap();
