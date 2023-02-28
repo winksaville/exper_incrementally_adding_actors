@@ -1,64 +1,46 @@
-# Experiment ownership of manages things
+# Experiment incrementally adding actors to an executor
 
-This "runs" but hangs and you have to Ctrl-C out because
-we have not successfully added a receiver for the new actor
-which is added to the ActorExecutor in test_conn_mgr.
-```
-wink@3900x 23-02-20T23:16:06.125Z:~/prgs/rust/myrepos/exper_ownership_of_managed_things (access_ae_from_ae_actor)
-$ cargo test -- --nocapture
-   Compiling exper_ownership_of_managed_things v0.1.0 (/home/wink/prgs/rust/myrepos/exper_ownership_of_managed_things)
-    Finished test [unoptimized + debuginfo] target(s) in 0.25s
-     Running unittests src/lib.rs (target/debug/deps/exper_ownership_of_managed_things-fe14290c80eef164)
+In my model for a Rust implemenation of the actor model
+actors need to communicate with each other. For that I
+will use channels and each connection will be independent.
+Further more, for efficiency, mulitple actors can share
+a thread. To accomplish these goals I need a communication
+mechanism where a single thread can "wait" on multiple
+channels. This cannot be accomplished with the Rust
+`std::sync::mpsc::channel`. Instead, I've chosen to use
+`crossbeam_channel`s.
 
-running 1 test
+In particular I'm using
+[`Select`](https://docs.rs/crossbeam/latest/crossbeam/channel/struct.Select.html)
+which supports selecting a ready channel from a set of channels.
 
-test_conn_mgr:+
-test_conn_mgr: executor1_tx=BiDirLocalChannel { self_tx: Sender { .. }, tx: Sender { .. }, rx: Receiver { .. } }
-test_conn_mgr: thing1=Thing { name: "t1", counter: 0 }
-recv_bdlc:+
-AE:executor1:+
-AE:executor1: TOL
-ActorExecutor.prossess_msg_any: msg=MsgReqAeAddActor { actor: Thing { name: "t1", counter: 0 }, rsp_tx: Sender { .. } }
-ActorExecutor.prossess_msg_any: added new receiver for t1
-AE:executor1: TOL
-recv_bdlc: msg_any=Any { .. }
-recv_bdlc: msg=MsgRspAeAddActor { bdlc: BiDirLocalChannel { self_tx: Sender { .. }, tx: Sender { .. }, rx: Receiver { .. } } }
-recv_bdlc:-
-test_conn_mgr: thing_bdlc=BiDirLocalChannel { self_tx: Sender { .. }, tx: Sender { .. }, rx: Receiver { .. } }
-test_conn_mgr: send MsgInc
-test_conn_mgr: sent MsgInc
-test_conn_mgr: send MsgReqCounter
-test_conn_mgr: sent MsgReqCounter
-test_conn_mgr: recv msg_any of MsgRspCounter
-^C
-```
+In all of the [`examples`](https://docs.rs/crossbeam/latest/crossbeam/channel/struct.Select.html)
+I found the set of operations, `Receivers<_>` in this case
+is created first and then added enmass to `Select` using the
+`recv` method.
 
-If I uncomment line 207 in src/lib.rs:
-```
-   204	                                // This is the key to making ActorExecutor work, we need to add a
-   205	                                // new receiver for this Actor, but this causes compile error[E0502]
-   206	                                // above, i.e. immutable and mutable borrows :(
-   207	                                //selector.recv(x.our_channel.get_recv());
-```
- I get a compile error:
-```
-wink@3900x 23-02-20T23:57:59.886Z:~/prgs/rust/myrepos/exper_ownership_of_managed_things (main)
-$ cargo build
-   Compiling exper_ownership_of_managed_things v0.1.0 (/home/wink/prgs/rust/myrepos/exper_ownership_of_managed_things)
-error[E0502]: cannot borrow `ae.bi_dir_channels_vec` as mutable because it is also borrowed as immutable
-   --> src/lib.rs:201:33
-    |
-201 | ...                   ae.bi_dir_channels_vec.push(bdlcs);
-    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ mutable borrow occurs here
-202 | ...                   let x = ae.bi_dir_channels_vec.get(actor_idx).unwrap();
-    |                               ------------------------------------- immutable borrow occurs here
-...
-207 | ...                   selector.recv(x.our_channel.get_recv());
-    |                       --------------------------------------- immutable borrow later used here
+But I want to be able to add actors incrementally and potentially
+move actors between threads. So initially I tried a simple solution,
+create a `Vec<Receivers<BoxMsgAny>>` ne solution I found was to pre-create
+all of the channels but that feels to limiting.
+So it can accomplish what I need. But I have one other constraint,
+I want to be able to add actors to `Select` incrementally.
 
-For more information about this error, try `rustc --explain E0502`.
-error: could not compile `exper_ownership_of_managed_things` due to previous error
-```
+But I ran into a problem,  in a crossbeam_channel Select uses
+the index into a vector of references to receivers as
+the "operation" handle. And when the Selector finds an
+receiver that is "ready" it returns its "operation" (i.e. the index).
+This by itself is fine, but the problem is you need an array of
+channels and you give a reference to the `Selector` into that array.
+That means the array of channels must be immutable.
+
+This is a problem as I want to be able to incrementally add channels
+which means the array of channels must be mutable. But then you run
+into a compiler problem because there are multiple references into
+a mutable array and it won't compile.
+
+The solution I found is to use `UnsafeCell` in `struct VecBdlcs`.
+I don't like using unsafe but it works for now.
 
 ## License
 
